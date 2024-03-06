@@ -5,7 +5,7 @@
  * @format
  */
 
-import React from 'react';
+import React, {useRef, useState} from 'react';
 import type {PropsWithChildren} from 'react';
 import {
   SafeAreaView,
@@ -15,19 +15,22 @@ import {
   Text,
   useColorScheme,
   View,
+  NativeModules,
+  Button,
+  EmitterSubscription,
 } from 'react-native';
-
-import {
-  Colors,
-  DebugInstructions,
-  Header,
-  LearnMoreLinks,
-  ReloadInstructions,
-} from 'react-native/Libraries/NewAppScreen';
+import {Colors, Header} from 'react-native/Libraries/NewAppScreen';
+import Braze from '@braze/react-native-sdk';
 
 type SectionProps = PropsWithChildren<{
   title: string;
 }>;
+
+interface BrazeManagerModule {
+  initialiseSDK(userId: string, token: string): Promise<boolean>;
+}
+
+const BrazeManager: BrazeManagerModule = NativeModules.BrazeManager;
 
 function Section({children, title}: SectionProps): React.JSX.Element {
   const isDarkMode = useColorScheme() === 'dark';
@@ -42,24 +45,99 @@ function Section({children, title}: SectionProps): React.JSX.Element {
         ]}>
         {title}
       </Text>
-      <Text
-        style={[
-          styles.sectionDescription,
-          {
-            color: isDarkMode ? Colors.light : Colors.dark,
-          },
-        ]}>
-        {children}
-      </Text>
+      {children}
     </View>
   );
 }
+
+type HeadersInit = [string, string][] | Record<string, string> | Headers;
+
+const getToken = async (): Promise<string | undefined> => {
+  try {
+    // TODO: replace this with your server that returns JWT tokens for Braze
+    const endpoint = '';
+    const headers: HeadersInit = {
+      'Content-Type': 'application/json;charset=UTF-8',
+      'Accept-Encoding': 'gzip',
+    };
+    const response = await fetch(endpoint, {
+      method: 'GET',
+      headers,
+    });
+    const responseStatus = response.status;
+    const body = (await response.json()) as Record<string, any>;
+    const accessToken = body ? body.accessToken : undefined;
+
+    if (responseStatus >= 200 && responseStatus <= 299 && accessToken) {
+      return accessToken;
+    }
+  } catch (e) {
+    console.warn(e);
+  }
+};
 
 function App(): React.JSX.Element {
   const isDarkMode = useColorScheme() === 'dark';
 
   const backgroundStyle = {
     backgroundColor: isDarkMode ? Colors.darker : Colors.lighter,
+  };
+
+  const [hasBrazeInit, setBrazeInit] = useState(false);
+  const [hasTokenExpired, setTokenExpired] = useState(false);
+  const [currentToken, setCurrentToken] = useState('');
+  const sdkAuthErrorSubscription = useRef<EmitterSubscription | null>(null);
+  const isUpdatingAuthToken = useRef<boolean>(false);
+
+  const generateNewToken = async () => {
+    setTokenExpired(true);
+    if (isUpdatingAuthToken.current) {
+      return;
+    }
+    isUpdatingAuthToken.current = true;
+    const newToken = await getToken();
+    if (newToken) {
+      try {
+        Braze.setSdkAuthenticationSignature(newToken);
+        isUpdatingAuthToken.current = false;
+        setTokenExpired(false);
+        setCurrentToken(newToken);
+      } catch (error) {
+        console.warn(error);
+      }
+    }
+  };
+
+  const setupAuthErrorSubscribtion = () => {
+    if (sdkAuthErrorSubscription.current) {
+      return;
+    }
+
+    sdkAuthErrorSubscription.current = Braze.addListener(
+      Braze.Events.SDK_AUTHENTICATION_ERROR,
+      async () => {
+        console.log(
+          '----------------- SDK_AUTHENTICATION_ERROR -----------------',
+        );
+        await generateNewToken();
+      },
+    );
+  };
+
+  const onBrazeInitPress = async () => {
+    try {
+      const userId = ''; // TODO: replace this with your User ID
+
+      // N.B. Left this intentionally with invalid token so the SDK ERROR emitter kicks off immediately
+      const result = await BrazeManager.initialiseSDK(userId, 'invalid_token');
+      if (result) {
+        setCurrentToken('invalid_token');
+        setBrazeInit(true);
+        setupAuthErrorSubscribtion();
+      }
+    } catch (e) {
+      console.warn(e);
+    }
   };
 
   return (
@@ -76,20 +154,28 @@ function App(): React.JSX.Element {
           style={{
             backgroundColor: isDarkMode ? Colors.black : Colors.white,
           }}>
-          <Section title="Step One">
-            Edit <Text style={styles.highlight}>App.tsx</Text> to change this
-            screen and then come back to see your edits.
+          <Section title="Braze">
+            <Text selectable={false}>
+              Has Braze initialised: {hasBrazeInit ? 'yes' : 'no'}
+            </Text>
+            <Text selectable={false}>
+              Has token expired: {hasTokenExpired ? 'yes' : 'no'}
+            </Text>
+            <Text selectable={false}>Current braze token:</Text>
+            <Text selectable>{currentToken}</Text>
+            {!hasBrazeInit && (
+              <Button title="Initialise Braze" onPress={onBrazeInitPress} />
+            )}
+            {hasBrazeInit && (
+              <Button
+                title="Launch content cards"
+                onPress={() => Braze.launchContentCards()}
+              />
+            )}
+            {hasBrazeInit && (
+              <Button title="Update token" onPress={generateNewToken} />
+            )}
           </Section>
-          <Section title="See Your Changes">
-            <ReloadInstructions />
-          </Section>
-          <Section title="Debug">
-            <DebugInstructions />
-          </Section>
-          <Section title="Learn More">
-            Read the docs to discover what to do next:
-          </Section>
-          <LearnMoreLinks />
         </View>
       </ScrollView>
     </SafeAreaView>
@@ -104,14 +190,6 @@ const styles = StyleSheet.create({
   sectionTitle: {
     fontSize: 24,
     fontWeight: '600',
-  },
-  sectionDescription: {
-    marginTop: 8,
-    fontSize: 18,
-    fontWeight: '400',
-  },
-  highlight: {
-    fontWeight: '700',
   },
 });
 
